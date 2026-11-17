@@ -1,0 +1,11 @@
+CIVICPROOF — GITHUB COPILOT EXECUTION SPECIFICATION
+====================================================
+
+This repository contains the initial MVP scaffold for CivicProof and demonstrates the intended product direction:
+- community-reporting workflow
+- synthetic Cape Town data
+- deterministic project matching
+- human review before project accountability investigations
+- clear labels that data is synthetic and not official municipal data
+
+The implementation remains a working foundation for a hackathon MVP and intentionally avoids claiming real government data or official conclusions.

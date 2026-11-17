@@ -1,0 +1,1 @@
+{"scripts":{"dev":"vite --host 0.0.0.0","build":"vue-tsc -p tsconfig.json --noEmit && vite build","preview":"vite preview","lint":"eslint .","typecheck":"vue-tsc -p tsconfig.json --noEmit","test":"vitest run","test:watch":"vitest","test:e2e":"playwright test","db:seed":"npx supabase db reset --local"},"devDependencies":{"@types/node":"^22.13.4"}}
