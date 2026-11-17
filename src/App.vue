@@ -1,87 +1,183 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { ArrowDownRight, ArrowUpRight, Bell, Check, ChevronDown, CircleHelp, ClipboardCheck, FileText, Filter, Lightbulb, MapPin, Menu, Plus, Search, ShieldCheck, SlidersHorizontal, Sparkles, Waves } from 'lucide-vue-next'
-import { categoryLabel, demoSubmissions, projects, type Category, type CivicSubmission, type ProjectStatus, type SubmissionType } from './domain/demoData'
+import { computed, onMounted, ref, watch } from 'vue'
+import { categoryLabel, demoSubmissions, projects, type Category, type CivicProject, type CivicSubmission, type SubmissionType } from './domain/demoData'
 import { findMatches } from './domain/matching'
 
-const tab = ref('Overview')
-const mode = ref('Community')
-const showForm = ref(false)
-const activeFilter = ref('All projects')
-const query = ref('')
-const notices = ref<string[]>([])
-const submissions = ref<CivicSubmission[]>(demoSubmissions.map(item => ({ ...item })))
-const activeSubmission = ref<CivicSubmission | null>(null)
-const form = ref({ type: 'COMMUNITY_NEED' as SubmissionType, category: 'PUBLIC_LIGHTING' as Category, title: '', description: '', area: 'Khayelitsha' })
-const nav = ['Overview', 'Community needs', 'Projects', 'Match review', 'Investigations', 'Map']
-const visibleProjects = computed(() => projects.filter(project => (activeFilter.value === 'All projects' || project.status === activeFilter.value) && `${project.name} ${project.area} ${categoryLabel(project.category)}`.toLowerCase().includes(query.value.toLowerCase())))
-const pendingMatches = computed(() => submissions.value.filter(item => item.matches.length && item.status === 'Match review'))
-const stats = computed(() => [
-  { label: 'Community reports', value: String(submissions.value.length).padStart(2, '0'), delta: '+ 3 this week', direction: 'up' },
-  { label: 'Projects in progress', value: String(projects.filter(project => project.status === 'IN_PROGRESS').length).padStart(2, '0'), delta: 'Across 6 communities', direction: 'flat' },
-  { label: 'Awaiting a response', value: String(submissions.value.filter(item => ['Awaiting response', 'Registered', 'Under investigation'].includes(item.status)).length).padStart(2, '0'), delta: 'Needs follow-up', direction: 'down' }
-])
+type Role = 'COMMUNITY_MEMBER' | 'GOVERNMENT_REVIEWER' | 'DEPARTMENT_OFFICIAL' | 'INVESTIGATOR' | 'AUDITOR' | 'ADMIN'
+type Response = { id: string; reportId: string; author: string; text: string; date: string }
+type Finding = { id: string; reportId: string; text: string; classification: string; date: string }
+type Action = { id: string; reportId: string; title: string; status: string }
+type Review = { id: string; reportId: string; projectId: string; status: 'CONFIRMED' | 'REJECTED'; reason: string }
+type Report = CivicSubmission & { matchCandidates: string[]; investigationType: 'COMMUNITY_NEED' | 'PROJECT_ACCOUNTABILITY' | null; finding?: string; actions?: string[] }
+
+const roles: Role[] = ['COMMUNITY_MEMBER', 'GOVERNMENT_REVIEWER', 'DEPARTMENT_OFFICIAL', 'INVESTIGATOR', 'AUDITOR', 'ADMIN']
+const role = ref<Role>('COMMUNITY_MEMBER')
+const activePage = ref('Overview')
+const modalOpen = ref(false)
+const activeReportId = ref<string | null>(null)
+const search = ref('')
+const projectStatusFilter = ref('ALL')
+const projectCategoryFilter = ref('ALL')
+const notice = ref('')
+const currentDate = new Date().toISOString().slice(0, 10)
+const demoItems = demoSubmissions.map((item, index): Report => ({
+  ...item,
+  matchCandidates: item.matches,
+  investigationType: item.status === 'Under investigation' ? 'COMMUNITY_NEED' : item.status === 'Investigation opened' ? 'PROJECT_ACCOUNTABILITY' : null,
+  status: item.status,
+  ...(index === 1 ? { finding: 'Reported road delivery remains unverified; compare the original scope with an authorised inspection before drawing conclusions.' } : {})
+}))
+const reports = ref<Report[]>(load('civicproof-reports', demoItems))
+const responses = ref<Response[]>(load('civicproof-responses', [
+  { id: 'response-demo-1', reportId: 'demo-report-001', author: 'Public Lighting Department (synthetic)', text: 'Acknowledged. A technical assessment has been requested; this is not a resolution.', date: '2026-11-16' }
+]))
+const findings = ref<Finding[]>(load('civicproof-findings', []))
+const actions = ref<Action[]>(load('civicproof-actions', []))
+const reviews = ref<Review[]>(load('civicproof-reviews', []))
+const form = ref({ type: 'COMMUNITY_NEED' as SubmissionType, category: 'PUBLIC_LIGHTING' as Category, title: '', description: '', area: 'Khayelitsha', location: '' })
+const responseText = ref('')
+const findingText = ref('')
+const actionText = ref('')
+const findingClass = ref('COMMUNITY_REPORTED')
+const reportDetail = computed(() => reports.value.find(item => item.id === activeReportId.value) ?? null)
+const openMatches = computed(() => reports.value.flatMap(report => report.matchCandidates.filter(id => !reviews.value.some(review => review.reportId === report.id && review.projectId === id)).map(projectId => ({ report, project: projects.find(item => item.id === projectId) })).filter(item => item.project)))
+const shownReports = computed(() => reports.value.filter(item => `${item.title} ${item.area} ${categoryLabel(item.category)}`.toLowerCase().includes(search.value.toLowerCase())))
+const shownProjects = computed(() => projects.filter(item => (projectStatusFilter.value === 'ALL' || item.status === projectStatusFilter.value) && (projectCategoryFilter.value === 'ALL' || item.category === projectCategoryFilter.value) && `${item.name} ${item.area}`.toLowerCase().includes(search.value.toLowerCase())))
+const investigations = computed(() => reports.value.filter(item => item.investigationType))
+const officialRoles: Role[] = ['DEPARTMENT_OFFICIAL', 'ADMIN']
+const reviewerRoles: Role[] = ['GOVERNMENT_REVIEWER', 'ADMIN']
+const investigatorRoles: Role[] = ['INVESTIGATOR', 'ADMIN']
+
+function load<T>(key: string, fallback: T): T {
+  try { const saved = localStorage.getItem(key); return saved ? JSON.parse(saved) as T : fallback }
+  catch { return fallback }
+}
+watch(reports, value => localStorage.setItem('civicproof-reports', JSON.stringify(value)), { deep: true })
+watch(responses, value => localStorage.setItem('civicproof-responses', JSON.stringify(value)), { deep: true })
+watch(findings, value => localStorage.setItem('civicproof-findings', JSON.stringify(value)), { deep: true })
+watch(actions, value => localStorage.setItem('civicproof-actions', JSON.stringify(value)), { deep: true })
+watch(reviews, value => localStorage.setItem('civicproof-reviews', JSON.stringify(value)), { deep: true })
+
+function flash(message: string) { notice.value = message; window.setTimeout(() => { if (notice.value === message) notice.value = '' }, 5500) }
+function openReport(item: Report) { activeReportId.value = item.id; activePage.value = 'Community needs' }
+function newReport() { modalOpen.value = true; activeReportId.value = null }
 function submitReport() {
-  if (!form.value.title.trim() || !form.value.description.trim()) { notices.value.unshift('Please provide a title and description.'); return }
-  const areaRecord = projects.find(project => project.area === form.value.area)!
-  const input = { ...form.value, latitude: areaRecord.latitude, longitude: areaRecord.longitude }
-  const match = findMatches(input, projects)
-  const submission: CivicSubmission = { id: `report-${Date.now()}`, ...form.value, latitude: areaRecord.latitude, longitude: areaRecord.longitude, createdAt: new Date().toISOString().slice(0, 10), status: match.status === 'NO_MATCH' ? 'Under investigation' : 'Match review', matches: match.candidates.map(item => item.project.id), synthetic: true }
-  submissions.value = [submission, ...submissions.value]
-  activeSubmission.value = submission
-  showForm.value = false
-  form.value.title = ''; form.value.description = ''
-  notices.value.unshift(match.status === 'NO_MATCH' ? 'Need registered. No matching public project was identified in the records currently available.' : `${match.candidates.length} possible project match${match.candidates.length === 1 ? '' : 'es'} found for human review.`)
-  tab.value = 'Community needs'
+  if (form.value.title.trim().length < 3 || form.value.description.trim().length < 10 || !form.value.location.trim()) { flash('Add a title, a description of at least 10 characters, and a location.'); return }
+  const areaProject = projects.find(item => item.area === form.value.area)!
+  const match = findMatches({ type: form.value.type, category: form.value.category, description: `${form.value.title} ${form.value.description}`, area: form.value.area, latitude: areaProject.latitude, longitude: areaProject.longitude }, projects)
+  const id = `report-${crypto.randomUUID()}`
+  const noProject = match.status === 'NO_MATCH'
+  const item: Report = {
+    id, type: form.value.type, title: form.value.title.trim(), description: form.value.description.trim(), category: form.value.category, area: form.value.area,
+    latitude: areaProject.latitude, longitude: areaProject.longitude, createdAt: currentDate,
+    status: noProject && form.value.type === 'COMMUNITY_NEED' ? 'Under investigation' : match.status === 'NO_MATCH' ? 'Registered' : 'Match review',
+    matches: match.candidates.map(candidate => candidate.project.id), matchCandidates: match.candidates.map(candidate => candidate.project.id),
+    synthetic: true, investigationType: noProject && form.value.type === 'COMMUNITY_NEED' ? 'COMMUNITY_NEED' : null
+  }
+  reports.value.unshift(item)
+  modalOpen.value = false
+  form.value.title = ''; form.value.description = ''; form.value.location = ''
+  activeReportId.value = id; activePage.value = 'Community needs'
+  flash(noProject ? 'Report registered. No matching public project was identified in the records currently available.' : `${match.candidates.length} possible project match(es) suggested for human review.`)
 }
-function decideMatch(submission: CivicSubmission, decision: 'Confirmed' | 'Rejected') {
-  submission.status = decision === 'Confirmed' ? 'Investigation opened' : 'Match rejected — need remains registered'
-  notices.value.unshift(decision === 'Confirmed' ? 'Relationship confirmed by reviewer. Accountability investigation opened; this does not verify the reported allegation.' : 'Match rejected. The original community report remains registered.')
+function review(report: Report, project: CivicProject, decision: 'CONFIRMED' | 'REJECTED') {
+  const reason = decision === 'CONFIRMED' ? 'Reviewer confirmed the relationship for investigation; the underlying report remains unverified.' : 'Reviewer rejected the suggested relationship; the community report remains registered.'
+  reviews.value.unshift({ id: crypto.randomUUID(), reportId: report.id, projectId: project.id, status: decision, reason })
+  if (decision === 'CONFIRMED') {
+    report.investigationType = 'PROJECT_ACCOUNTABILITY'; report.status = 'Investigation opened'
+    flash('Match confirmed. A project accountability investigation is open; this does not verify the allegation.')
+  } else {
+    report.matchCandidates = report.matchCandidates.filter(id => id !== project.id)
+    report.matches = report.matches.filter(id => id !== project.id)
+    if (!report.matchCandidates.length && report.type === 'COMMUNITY_NEED') { report.investigationType = 'COMMUNITY_NEED'; report.status = 'Under investigation' }
+    else if (!report.matchCandidates.length) report.status = 'Registered'
+    flash('Match rejected. Original submission preserved; the report remains registered.')
+  }
 }
-function selectTab(item: string) { tab.value = item; activeSubmission.value = null }
-function setFilter(status: string) { activeFilter.value = status }
+function addResponse(report: Report) {
+  if (!responseText.value.trim()) return
+  responses.value.unshift({ id: crypto.randomUUID(), reportId: report.id, author: `${role.value.replaceAll('_', ' ')} (demo)`, text: responseText.value.trim(), date: currentDate })
+  responseText.value = ''
+  if (report.status === 'Registered') report.status = 'Awaiting response'
+  flash('Response recorded in this browser demo. An acknowledgement does not resolve a need.')
+}
+function addFinding(report: Report) {
+  if (!findingText.value.trim()) return
+  findings.value.unshift({ id: crypto.randomUUID(), reportId: report.id, text: findingText.value.trim(), classification: findingClass.value, date: currentDate })
+  findingText.value = ''
+  report.finding = 'Finding recorded — see evidence classification below.'
+  report.status = 'Finding recorded'
+  flash('Finding recorded with its evidence classification.')
+}
+function addAction(report: Report) {
+  if (!actionText.value.trim()) return
+  actions.value.unshift({ id: crypto.randomUUID(), reportId: report.id, title: actionText.value.trim(), status: 'OPEN' })
+  actionText.value = ''
+  flash('Corrective action recorded.')
+}
+function resetDemo() {
+  if (!window.confirm('Reset this browser’s synthetic demo reports, responses, reviews and investigations?')) return
+  for (const key of ['civicproof-reports','civicproof-responses','civicproof-findings','civicproof-actions','civicproof-reviews']) localStorage.removeItem(key)
+  reports.value = demoItems.map(item => ({ ...item, matchCandidates: [...item.matchCandidates], matches: [...item.matches] }))
+  responses.value = [{ id: 'response-demo-1', reportId: 'demo-report-001', author: 'Public Lighting Department (synthetic)', text: 'Acknowledged. A technical assessment has been requested; this is not a resolution.', date: '2026-11-16' }]
+  findings.value = []; actions.value = []; reviews.value = []; activeReportId.value = null
+  flash('Synthetic demo data reset in this browser only.')
+}
+function go(page: string) { activePage.value = page; activeReportId.value = null; search.value = '' }
+function projectById(id: string) { return projects.find(item => item.id === id) }
 </script>
 
 <template>
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="#" @click.prevent="selectTab('Overview')"><span class="brand-mark"><ShieldCheck :size="20" /></span><span class="brand-text">Civic<span>Proof</span><small>PUBLIC ACCOUNTABILITY</small></span></a>
-      <div class="workspace-label">WORKSPACE</div>
-      <nav class="primary-nav" aria-label="Main navigation">
-        <button v-for="(item, index) in nav" :key="item" :class="['nav-item', { selected: tab === item }]" @click="selectTab(item)"><span class="nav-icon"><component :is="[Waves, Lightbulb, ClipboardCheck, Check, FileText, MapPin][index]" :size="17" /></span>{{ item }}<span v-if="item === 'Match review' && pendingMatches.length" class="nav-count">{{ pendingMatches.length }}</span></button>
+      <button class="brand" @click="go('Overview')"><span class="brand-mark">C</span><span class="brand-word">Civic<strong>Proof</strong><small>PUBLIC ACCOUNTABILITY</small></span></button>
+      <div class="nav-caption">DEMO WORKSPACE</div>
+      <nav aria-label="Main navigation">
+        <button v-for="page in ['Overview','Community needs','Projects','Match review','Investigations','Map']" :key="page" :class="['nav-link',{active:activePage===page}]" @click="go(page)"><span>{{ ({Overview:'◈','Community needs':'◎',Projects:'▤','Match review':'⌕',Investigations:'◷',Map:'⌖'} as Record<string,string>)[page] }}</span>{{ page }}<b v-if="page==='Match review' && openMatches.length">{{ openMatches.length }}</b></button>
       </nav>
-      <div class="sidebar-bottom"><div class="sidebar-tip"><div class="tip-icon"><Sparkles :size="15" /></div><strong>Community-led insight</strong><p>Every report starts with a lived experience, not a project ID.</p><button @click="showForm = true">Share an observation <ArrowDownRight :size="14" /></button></div><div class="user-card"><div class="avatar">VM</div><div><strong>Vusani Makhomu</strong><small>Community member</small></div><ChevronDown :size="15" /></div></div>
+      <div class="sidebar-spacer"></div>
+      <div class="side-note"><span>✦</span><strong>Community-led insight</strong><p>Residents report their reality. Project matches are suggestions, never proof.</p><button @click="newReport">＋ Share a need</button></div>
+      <label class="role-select"><small>DEMO ROLE — NOT AUTHENTICATION</small><select v-model="role" aria-label="Switch demo role"><option v-for="item in roles" :key="item" :value="item">{{ item.replaceAll('_',' ') }}</option></select></label>
+      <div class="side-user"><span class="avatar">{{ role==='COMMUNITY_MEMBER'?'CM':role.slice(0,2) }}</span><span><strong>{{ role.replaceAll('_',' ') }}</strong><small>Local demo session</small></span></div>
     </aside>
     <main class="main-area">
-      <header class="topbar"><div class="breadcrumbs"><span>Workspace</span><span class="crumb-sep">/</span><strong>{{ tab }}</strong></div><div class="top-actions"><span class="data-badge"><span></span>SYNTHETIC DEMO DATA</span><button class="icon-button" aria-label="Help"><CircleHelp :size="18" /></button><button class="icon-button notification" aria-label="Notifications"><Bell :size="18" /><i></i></button><button class="role-switch" @click="mode = mode === 'Community' ? 'Official demo' : 'Community'">{{ mode }} <ChevronDown :size="14" /></button></div></header>
-      <div class="page-content">
-        <template v-if="tab === 'Overview'">
-          <div class="welcome-row"><div><div class="eyebrow">MONDAY, NOVEMBER 17, 2026 <span class="live-dot"></span> CAPE TOWN</div><h1>Good morning, Vusani <span class="wave">✳</span></h1><p class="subtitle">Your community, your voice. Here’s what’s happening across your reports.</p></div><button class="button primary" @click="showForm = true"><Plus :size="17" /> Report a need</button></div>
-          <section class="metrics-grid"><article v-for="(stat, index) in stats" :key="stat.label" class="metric-card"><div class="metric-top"><span>{{ stat.label }}</span><span class="metric-icon" :class="`metric-${index}`"><component :is="[FileText, ClipboardCheck, Bell][index]" :size="17" /></span></div><div class="metric-bottom"><strong>{{ stat.value }}</strong><span :class="['metric-note', stat.direction]">{{ stat.direction === 'up' ? '↗ ' : '' }}{{ stat.delta }}</span></div></article></section>
-          <section class="feature-grid"><article class="card reports-card"><div class="section-heading"><div><div class="eyebrow">YOUR COMMUNITY</div><h2>Recent reports</h2></div><button class="text-link" @click="selectTab('Community needs')">View all <ArrowUpRight :size="15" /></button></div><div class="report-list"><button v-for="submission in submissions.slice(0, 4)" :key="submission.id" class="report-row" @click="activeSubmission = submission; tab = 'Community needs'"><span class="report-icon" :class="submission.category.toLowerCase()"><Lightbulb :size="17" /></span><span class="report-details"><strong>{{ submission.title }}</strong><small><MapPin :size="12" /> {{ submission.area }} <span>·</span> {{ categoryLabel(submission.category) }}</small></span><span class="status-pill" :class="submission.status.toLowerCase().replaceAll(' ', '-')">{{ submission.status }}</span><ArrowUpRight class="row-arrow" :size="15" /></button></div></article>
-            <article class="card activity-card"><div class="section-heading"><div><div class="eyebrow">STAY INFORMED</div><h2>Community activity</h2></div><button class="more-button">···</button></div><div class="activity-highlight"><div class="activity-watermark"><Waves :size="104" /></div><div class="activity-label"><span class="activity-dot"></span>THIS WEEK</div><strong>More voices,<br />stronger evidence.</strong><p>Community reports help surface needs and questions for follow-up.</p><button @click="selectTab('Community needs')">Explore reports <ArrowUpRight :size="14" /></button></div><div class="activity-footer"><div class="avatar-stack"><i>KM</i><i>TN</i><i>+8</i></div><span>Neighbors are contributing</span></div></article></section>
-          <section class="card projects-card"><div class="section-heading project-heading"><div><div class="eyebrow">PUBLIC PROJECT REGISTER <span class="synthetic-inline">SYNTHETIC</span></div><h2>Projects in your area</h2></div><div class="project-tools"><label class="search-box"><Search :size="15" /><input v-model="query" aria-label="Search projects" placeholder="Search projects..." /></label><select v-model="activeFilter" aria-label="Filter projects"><option>All projects</option><option value="IN_PROGRESS">In progress</option><option value="PLANNED">Planned</option><option value="COMPLETED">Completed</option></select><button class="filter-button" @click="setFilter('All projects')"><SlidersHorizontal :size="15" /></button></div></div><div class="project-table-wrap"><table><thead><tr><th>PROJECT</th><th>AREA</th><th>STATUS</th><th>PROGRESS</th><th>EST. BUDGET</th><th></th></tr></thead><tbody><tr v-for="project in visibleProjects.slice(0, 5)" :key="project.id" @click="selectTab('Projects')"><td><span class="project-symbol"><component :is="project.category === 'WATER' ? Waves : Lightbulb" :size="15" /></span><span class="project-name">{{ project.name }}<small>{{ categoryLabel(project.category) }}</small></span></td><td>{{ project.area }}</td><td><span :class="['project-status', project.status.toLowerCase().replace('_', '-')]">{{ project.status.replace('_', ' ') }}</span></td><td><div class="progress-cell"><div class="progress-track"><i :style="{ width: `${project.progress}%` }"></i></div><span>{{ project.progress }}%</span></div></td><td>{{ project.budget ? `R ${(project.budget / 1000000).toFixed(1)}m` : '—' }}</td><td><ArrowUpRight :size="15" class="row-arrow" /></td></tr></tbody></table></div><button class="table-footer" @click="selectTab('Projects')">Explore all 18 projects <ArrowUpRight :size="14" /></button></section>
-          <div class="bottom-note"><ShieldCheck :size="15" /><span>Reports are community-reported and may need verification. A suggested match is not a confirmed relationship.</span><button>Learn about evidence <ArrowUpRight :size="13" /></button></div>
+      <header class="topbar"><div><span class="muted">Workspace</span><span class="slash">/</span><strong>{{ activePage }}</strong></div><div class="top-right"><span class="synthetic-label"><i></i>SYNTHETIC DEMO DATA</span><button class="role-compact" @click="go('Admin')">{{ role.replaceAll('_',' ') }}</button></div></header>
+      <div class="content">
+        <template v-if="activePage==='Overview'">
+          <div class="page-head"><div><div class="eyebrow">CAPE TOWN · DEMONSTRATION ONLY</div><h1>Your community, your voice.</h1><p>Connect reported needs with public project records and visible follow-up.</p></div><button class="primary-btn" @click="newReport">＋ Report a need</button></div>
+          <div class="notice-banner"><strong>Demo dataset:</strong> every project, person, location detail and response here is synthetic—not City of Cape Town data.</div>
+          <section class="stats"><article><span>Community reports</span><strong>{{ reports.length.toString().padStart(2,'0') }}</strong><small>Preserved as submitted</small></article><article><span>Projects in progress</span><strong>{{ projects.filter(p=>p.status==='IN_PROGRESS').length.toString().padStart(2,'0') }}</strong><small>Fictional demo records</small></article><article><span>Needs / investigations</span><strong>{{ investigations.length.toString().padStart(2,'0') }}</strong><small>{{ openMatches.length }} match(es) awaiting review</small></article></section>
+          <div class="grid-two">
+            <section class="panel"><div class="panel-head"><div><div class="eyebrow">COMMUNITY VOICE</div><h2>Recent reports</h2></div><button class="text-btn" @click="go('Community needs')">View all →</button></div>
+              <button v-for="item in reports.slice(0,5)" :key="item.id" class="report-row" @click="openReport(item)"><span class="row-icon">{{ item.type==='COMMUNITY_NEED'?'＋':'◉' }}</span><span class="row-main"><strong>{{ item.title }}</strong><small>{{ item.area }} · {{ categoryLabel(item.category) }}</small></span><span class="status-tag">{{ item.status }}</span><span class="arrow">↗</span></button>
+            </section>
+            <section class="panel focus-panel"><div class="eyebrow">HOW CIVICPROOF WORKS</div><h2>Start with lived experience.</h2><p>Report a need or observation without a project ID. The report is registered first; potential matches are reviewed separately.</p><div class="flow"><span>Report</span><i>→</i><span>Suggest</span><i>→</i><span>Review</span><i>→</i><span>Follow up</span></div><div class="fineprint">No match found means no relevant record was identified in available data. It does not prove that no project exists.</div></section>
+          </div>
+          <section class="panel project-panel"><div class="panel-head"><div><div class="eyebrow">SYNTHETIC PROJECT REGISTER</div><h2>Projects in the demo</h2></div><button class="text-btn" @click="go('Projects')">Browse 18 projects →</button></div><div class="project-strip"><article v-for="project in projects.slice(0,4)" :key="project.id"><span class="project-type">{{ categoryLabel(project.category) }}</span><strong>{{ project.name }}</strong><small>{{ project.area }} · {{ project.status.replace('_',' ') }}</small><div class="progress"><i :style="{width:`${project.progress}%`}"></i></div></article></div></section>
         </template>
-        <template v-else-if="tab === 'Community needs'">
-          <div class="welcome-row"><div><div class="eyebrow">COMMUNITY VOICE</div><h1>Community needs</h1><p class="subtitle">Reports are registered without project approval. Follow their progress here.</p></div><button class="button primary" @click="showForm = true"><Plus :size="17" /> Report a need</button></div>
-          <div v-if="activeSubmission" class="card detail-card"><button class="text-link" @click="activeSubmission = null">← All community needs</button><div class="eyebrow">{{ activeSubmission.type.replace('_', ' ') }} · COMMUNITY REPORTED</div><h2>{{ activeSubmission.title }}</h2><p>{{ activeSubmission.description }}</p><p><MapPin :size="15" /> {{ activeSubmission.area }} · {{ categoryLabel(activeSubmission.category) }}</p><div class="caution">A community report is not independently verified. No matching public record means only that none was identified in the data currently available.</div><h3>Progress and follow-up</h3><span class="status-pill">{{ activeSubmission.status }}</span><p class="evidence-note">Any synthetic records shown here are for demonstration, not actual municipal records.</p></div>
-          <section v-else class="card reports-card full-card"><div class="section-heading"><div><div class="eyebrow">ALL SUBMISSIONS</div><h2>{{ submissions.length }} reports and needs</h2></div><label class="search-box"><Search :size="15" /><input v-model="query" placeholder="Search reports..." /></label></div><div class="report-list"><button v-for="item in submissions.filter(item => `${item.title} ${item.area}`.toLowerCase().includes(query.toLowerCase()))" :key="item.id" class="report-row" @click="activeSubmission = item"><span class="report-icon"><Lightbulb :size="17" /></span><span class="report-details"><strong>{{ item.title }}</strong><small><MapPin :size="12" /> {{ item.area }} · {{ categoryLabel(item.category) }} · {{ item.createdAt }}</small></span><span class="status-pill">{{ item.status }}</span><ArrowUpRight class="row-arrow" :size="15" /></button></div></section>
+        <template v-else-if="activePage==='Community needs'">
+          <div class="page-head"><div><div class="eyebrow">REGISTERED WITHOUT PROJECT APPROVAL</div><h1>Community needs & reports</h1><p>Each submission remains intact even when matches are rejected.</p></div><button class="primary-btn" @click="newReport">＋ New submission</button></div>
+          <section v-if="reportDetail" class="panel detail-panel"><button class="text-btn back-btn" @click="activeReportId=null">← All reports</button><div class="detail-heading"><div><span class="evidence-badge">COMMUNITY REPORTED</span><span class="status-tag">{{ reportDetail.status }}</span><h2>{{ reportDetail.title }}</h2><p>{{ reportDetail.description }}</p></div><span class="detail-location">⌖ {{ reportDetail.area }} · {{ categoryLabel(reportDetail.category) }}</span></div>
+            <div class="caution"><strong>Evidence note</strong> This is a community-reported claim, not an independently verified finding. “No matching public record found” is limited to the data currently available.</div>
+            <div class="detail-grid"><div><h3>Suggested project records</h3><div v-if="reportDetail.matchCandidates.length" class="candidate-list"><article v-for="id in reportDetail.matchCandidates" :key="id" class="candidate"><template v-if="projectById(id)"><strong>{{ projectById(id)?.name }}</strong><small>{{ projectById(id)?.area }} · {{ categoryLabel(projectById(id)!.category) }} · {{ projectById(id)?.status.replace('_',' ') }}</small><p>Heuristic candidate based on category, area, text and approximate coordinates. Score is not a probability.</p></template><span v-else>Project record unavailable</span></article></div><p v-else class="muted-paragraph">No candidate identified in available synthetic records. The community report remains registered.</p></div>
+              <div><h3>Responses</h3><article v-for="item in responses.filter(x=>x.reportId===reportDetail!.id)" :key="item.id" class="timeline-entry"><strong>{{ item.author }}</strong><p>{{ item.text }}</p><small>{{ item.date }} · Official response (demo)</small></article><p v-if="!responses.some(x=>x.reportId===reportDetail!.id)" class="muted-paragraph">No response recorded yet.</p><form v-if="officialRoles.includes(role)" class="inline-form" @submit.prevent="addResponse(reportDetail!)"><textarea v-model="responseText" required placeholder="Record an acknowledgement, referral or next step"></textarea><button class="primary-btn small-btn">Record response</button></form></div></div>
+            <div v-if="reportDetail.investigationType" class="investigation-box"><div class="panel-head"><div><div class="eyebrow">{{ reportDetail.investigationType==='COMMUNITY_NEED'?'UNMATCHED COMMUNITY NEED':'CONFIRMED PROJECT RELATIONSHIP' }}</div><h3>{{ reportDetail.investigationType.replace('_',' ') }} investigation</h3></div><span class="status-tag">{{ reportDetail.status }}</span></div><p>Opening an investigation records a follow-up workflow; it does not determine whether an allegation is true.</p>
+              <div v-for="finding in findings.filter(x=>x.reportId===reportDetail!.id)" :key="finding.id" class="timeline-entry"><strong>Finding · {{ finding.classification.replaceAll('_',' ') }}</strong><p>{{ finding.text }}</p><small>{{ finding.date }}</small></div>
+              <form v-if="investigatorRoles.includes(role)" class="inline-form" @submit.prevent="addFinding(reportDetail!)"><select v-model="findingClass"><option>COMMUNITY_REPORTED</option><option>SYSTEM_IDENTIFIED</option><option>OFFICIALLY_RECORDED</option><option>HUMAN_REVIEWED</option><option>INDEPENDENTLY_VERIFIED</option><option>OFFICIALLY_CONFIRMED</option></select><textarea v-model="findingText" required placeholder="Record finding and the evidence basis"></textarea><button class="primary-btn small-btn">Record classified finding</button></form>
+              <h4>Corrective actions</h4><div v-for="action in actions.filter(x=>x.reportId===reportDetail!.id)" :key="action.id" class="action-row"><span>{{ action.title }}</span><button class="status-tag" @click="action.status=action.status==='OPEN'?'COMPLETE':'OPEN'">{{ action.status }}</button></div><form v-if="investigatorRoles.includes(role)" class="inline-form action-form" @submit.prevent="addAction(reportDetail!)"><input v-model="actionText" required placeholder="Describe a follow-up action"/><button class="secondary-btn small-btn">＋ Add action</button></form>
+            </div>
+          </section>
+          <section v-else class="panel list-panel"><div class="panel-head"><div><div class="eyebrow">ALL SUBMISSIONS</div><h2>{{ shownReports.length }} community reports</h2></div><input v-model="search" class="search" placeholder="Search reports"/></div><button v-for="item in shownReports" :key="item.id" class="report-row" @click="openReport(item)"><span class="row-icon">{{ item.type==='COMMUNITY_NEED'?'＋':'◉' }}</span><span class="row-main"><strong>{{ item.title }}</strong><small>{{ item.area }} · {{ categoryLabel(item.category) }} · {{ item.createdAt }}</small></span><span class="status-tag">{{ item.status }}</span><span class="arrow">↗</span></button></section>
         </template>
-        <template v-else-if="tab === 'Projects'">
-          <div class="welcome-row"><div><div class="eyebrow">SYNTHETIC PUBLIC PROJECT REGISTER</div><h1>Projects</h1><p class="subtitle">Fictional examples only — not City of Cape Town records.</p></div><label class="search-box"><Search :size="15" /><input v-model="query" placeholder="Search projects..." /></label></div>
-          <section class="metrics-grid"><article v-for="status in ['COMPLETED', 'IN_PROGRESS', 'PLANNED']" :key="status" class="metric-card"><div class="eyebrow">{{ status.replace('_', ' ') }}</div><strong class="project-count">{{ projects.filter(item => item.status === status).length }}</strong><span class="metric-note">Synthetic projects</span></article></section>
-          <section class="card projects-card"><div class="section-heading"><div><div class="eyebrow">CAPE TOWN DEMO</div><h2>Project register</h2></div><select v-model="activeFilter" aria-label="Filter projects"><option>All projects</option><option value="IN_PROGRESS">In progress</option><option value="PLANNED">Planned</option><option value="COMPLETED">Completed</option></select></div><div class="project-table-wrap"><table><thead><tr><th>PROJECT</th><th>AREA</th><th>STATUS</th><th>PROGRESS</th><th>EST. BUDGET</th></tr></thead><tbody><tr v-for="project in visibleProjects" :key="project.id"><td><span class="project-name">{{ project.name }}<small>{{ categoryLabel(project.category) }} · {{ project.scope }}</small></span></td><td>{{ project.area }}</td><td>{{ project.status.replace('_', ' ') }}</td><td>{{ project.progress }}%</td><td>R {{ (project.budget! / 1000000).toFixed(1) }}m</td></tr></tbody></table></div></section>
-        </template>
-        <template v-else-if="tab === 'Match review'">
-          <div class="welcome-row"><div><div class="eyebrow">HUMAN REVIEW REQUIRED</div><h1>Potential matches</h1><p class="subtitle">A suggested relationship is not confirmed and does not prove a report allegation.</p></div></div>
-          <section v-if="pendingMatches.length" class="review-list"><article v-for="item in pendingMatches" :key="item.id" class="card review-card"><div class="eyebrow">COMMUNITY REPORTED · MATCH SUGGESTION</div><h2>{{ item.title }}</h2><p>{{ item.description }}</p><div v-for="id in item.matches" :key="id" class="candidate"><div><strong>{{ projects.find(project => project.id === id)?.name }}</strong><p>{{ projects.find(project => project.id === id)?.area }} · {{ categoryLabel(projects.find(project => project.id === id)!.category) }} · {{ projects.find(project => project.id === id)?.status.replace('_', ' ') }}</p><small>Reasons: category/location similarity. Heuristic suggestion, not a probability.</small></div><div class="review-actions"><button class="button subtle" @click="decideMatch(item, 'Rejected')">Reject</button><button class="button primary" @click="decideMatch(item, 'Confirmed')">Confirm</button></div></div></article></section><div v-else class="empty-state"><ClipboardCheck :size="32" /><h2>No matches awaiting review</h2><p>New candidate matches will appear here.</p></div>
-        </template>
-        <template v-else-if="tab === 'Investigations'"><div class="welcome-row"><div><div class="eyebrow">FOLLOW-UP AND EVIDENCE</div><h1>Investigations</h1><p class="subtitle">Community-need follow-up is separate from project accountability investigations.</p></div></div><section class="card reports-card full-card"><div class="section-heading"><div><div class="eyebrow">OPEN CASES</div><h2>{{ submissions.filter(item => ['Under investigation', 'Investigation opened'].includes(item.status)).length }} investigations</h2></div></div><div class="report-list"><div v-for="item in submissions.filter(item => ['Under investigation', 'Investigation opened'].includes(item.status))" :key="item.id" class="report-row"><span class="report-icon"><FileText :size="17" /></span><span class="report-details"><strong>{{ item.title }}</strong><small>{{ item.matches.length ? 'Project accountability' : 'Community need' }} · {{ item.area }} · Evidence: community-reported</small></span><span class="status-pill">{{ item.status }}</span></div></div></section></template>
-        <template v-else><div class="welcome-row"><div><div class="eyebrow">APPROXIMATE DEMO LOCATIONS</div><h1>Community map</h1><p class="subtitle">Markers show approximate synthetic locations, not verified infrastructure boundaries.</p></div></div><div class="card map-panel"><div class="map-key"><span><i class="project-key"></i> Synthetic public project</span><span><i class="report-key"></i> Community report</span></div><div class="map-surface"><span v-for="(project,index) in projects" :key="project.id" :title="`${project.name} (synthetic)`" class="map-marker project-marker" :style="{ left: `${15 + (index * 37 % 72)}%`, top: `${12 + (index * 53 % 72)}%` }"><span>✦</span></span><span v-for="(item,index) in submissions" :key="item.id" :title="`${item.title} (synthetic community report)`" class="map-marker report-marker" :style="{ left: `${18 + (index * 61 % 68)}%`, top: `${15 + (index * 43 % 70)}%` }"><span>●</span></span><div class="map-title">CAPE TOWN <small>SYNTHETIC DEMO LOCATIONS</small></div></div><div class="map-disclaimer">Synthetic locations are approximate and must not be interpreted as verified project boundaries or actual municipal records.</div></div></template>
+        <template v-else-if="activePage==='Projects'"><div class="page-head"><div><div class="eyebrow">FICTIONAL REGISTER · NOT MUNICIPAL DATA</div><h1>Public projects</h1><p>Approximate demo locations. These are not verified infrastructure boundaries.</p></div></div><section class="panel list-panel"><div class="panel-head filters"><input v-model="search" class="search" placeholder="Search project or area"/><select v-model="projectStatusFilter"><option value="ALL">All statuses</option><option value="PLANNED">Planned</option><option value="IN_PROGRESS">In progress</option><option value="COMPLETED">Completed</option></select><select v-model="projectCategoryFilter"><option value="ALL">All categories</option><option v-for="category in (['ROADS_TRANSPORT','PUBLIC_LIGHTING','WATER','SANITATION','STORMWATER','WASTE_MANAGEMENT','PUBLIC_FACILITIES'] as Category[])" :key="category" :value="category">{{ categoryLabel(category) }}</option></select></div><article v-for="project in shownProjects" :key="project.id" class="project-row"><div><strong>{{ project.name }}</strong><small>{{ project.area }} · {{ categoryLabel(project.category) }}</small><p>{{ project.description }} Scope: {{ project.scope }}.</p></div><div class="project-meta"><span class="status-tag">{{ project.status.replace('_',' ') }}</span><strong>{{ project.progress }}%</strong></div><div class="progress"><i :style="{width:`${project.progress}%`}"></i></div><small>Synthetic demo record · Estimated value R {{ project.budget?.toLocaleString('en-ZA') }} · source: SYNTHETIC_DEMO_DATA</small></article></section></template>
+        <template v-else-if="activePage==='Match review'"><div class="page-head"><div><div class="eyebrow">AUTHORISED DEMO REVIEW</div><h1>Potential matches</h1><p>A suggested relationship is not confirmed, and does not prove the report’s allegation.</p></div></div><div v-if="!reviewerRoles.includes(role)" class="notice-banner">Switch the demo role to GOVERNMENT REVIEWER to access match decisions. This role selector is a demo convenience, not security.</div><section v-for="item in openMatches" :key="`${item.report.id}-${item.project!.id}`" class="panel review-card"><span class="evidence-badge">COMMUNITY REPORTED</span><h2>{{ item.report.title }}</h2><p>{{ item.report.description }}</p><div class="candidate"><strong>{{ item.project!.name }}</strong><small>{{ item.project!.area }} · {{ categoryLabel(item.project!.category) }} · {{ item.project!.status.replace('_',' ') }}</small><p>Reasons: {{ item.project!.category===item.report.category?'category match · ':'' }}area and approximate-location proximity; some report/project terms may overlap.</p></div><div v-if="reviewerRoles.includes(role)" class="review-buttons"><button class="secondary-btn" @click="review(item.report,item.project!,'REJECTED')">Reject suggestion</button><button class="primary-btn" @click="review(item.report,item.project!,'CONFIRMED')">Confirm relationship</button></div></section><div v-if="!openMatches.length" class="empty">No suggested matches awaiting a decision.</div><section v-if="reviews.length" class="panel"><h2>Review history</h2><article v-for="item in reviews" :key="item.id" class="history-row"><span>{{ item.status }}</span><strong>{{ reports.find(r=>r.id===item.reportId)?.title }}</strong><small>{{ item.reason }}</small></article></section></template>
+        <template v-else-if="activePage==='Investigations'"><div class="page-head"><div><div class="eyebrow">FOLLOW-UP AND EVIDENCE</div><h1>Investigations</h1><p>Community-need follow-up is separate from project accountability investigation.</p></div></div><section v-if="investigations.length" class="panel list-panel"><button v-for="item in investigations" :key="item.id" class="report-row" @click="openReport(item)"><span class="row-icon">◷</span><span class="row-main"><strong>{{ item.title }}</strong><small>{{ item.investigationType?.replace('_',' ') }} · {{ item.area }} · evidence: community-reported</small></span><span class="status-tag">{{ item.status }}</span></button></section><div v-else class="empty">No investigations. A community need with no suggested project still qualifies for follow-up.</div></template>
+        <template v-else-if="activePage==='Map'"><div class="page-head"><div><div class="eyebrow">APPROXIMATE SYNTHETIC LOCATIONS</div><h1>Community map</h1><p>Markers are illustrative, not verified infrastructure boundaries or official records.</p></div></div><section class="panel map-panel"><div class="map-legend"><span><i class="project-dot"></i> Synthetic project</span><span><i class="report-dot"></i> Community report</span></div><div class="map-canvas"><span v-for="(item,index) in projects" :key="item.id" class="map-marker project-marker" :title="item.name+' — synthetic'" :style="{left:`${7+(index*37%86)}%`,top:`${10+(index*53%76)}%`}">✦</span><span v-for="(item,index) in reports" :key="item.id" class="map-marker report-marker" :title="item.title+' — community reported'" :style="{left:`${10+(index*61%80)}%`,top:`${13+(index*43%72)}%`}">●</span><div class="map-label">CAPE TOWN<small>SYNTHETIC DEMO LOCATIONS</small></div></div><p class="muted-paragraph">Approximate fictional locations only. A map marker is not a verified project boundary.</p></section></template>
+        <template v-else><div class="page-head"><div><div class="eyebrow">DEMO ADMINISTRATION</div><h1>Demo data & setup</h1><p>Use the role selector for demonstration only. Browser data is not shared across devices.</p></div></div><section class="panel admin-panel"><h2>Safety and data provenance</h2><p>All current projects and seeded submissions are synthetic. New reports entered in this offline demo are stored in this browser’s local storage and marked synthetic.</p><p>No Supabase project is configured automatically. The schema migrations are a starting point for a separately configured backend.</p><button v-if="role==='ADMIN'" class="danger-btn" @click="resetDemo">Reset synthetic data in this browser</button><div v-else class="notice-banner">Switch the demo role to ADMIN to reveal the local-only reset action.</div></section><section class="panel"><h2>Evidence classifications</h2><p>COMMUNITY_REPORTED · SYSTEM_IDENTIFIED · OFFICIALLY_RECORDED · HUMAN_REVIEWED · INDEPENDENTLY_VERIFIED · OFFICIALLY_CONFIRMED</p><p class="muted-paragraph">Classification is a recorded label, not automatic verification. A match confirmation does not verify the underlying claim.</p></section></template>
       </div>
     </main>
-    <div v-if="showForm" class="modal-backdrop" @click.self="showForm = false"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="form-title"><button class="modal-close" aria-label="Close" @click="showForm = false">×</button><div class="eyebrow">COMMUNITY SUBMISSION</div><h2 id="form-title">Share what your community needs</h2><p>You do not need a project ID, proof of residence or government approval to report.</p><form @submit.prevent="submitReport"><label>What are you reporting?<select v-model="form.type"><option value="COMMUNITY_NEED">A community need</option><option value="SERVICE_OBSERVATION">A service observation</option></select></label><label>Category<select v-model="form.category"><option v-for="(label,key) in { PUBLIC_LIGHTING: 'Public lighting', ROADS_TRANSPORT: 'Roads & transport', WATER: 'Water', SANITATION: 'Sanitation', STORMWATER: 'Stormwater', WASTE_MANAGEMENT: 'Waste management', PUBLIC_FACILITIES: 'Public facilities' }" :key="key" :value="key">{{ label }}</option></select></label><label>Title<input v-model="form.title" required maxlength="120" placeholder="What is the issue?" /></label><label>What have you observed?<textarea v-model="form.description" required rows="4" placeholder="Describe the need or service concern"></textarea></label><label>Area<select v-model="form.area"><option v-for="area in [...new Set(projects.map(project => project.area))]" :key="area">{{ area }}</option></select></label><div class="caution">Optional evidence upload is planned; no media is required for this demo. All submitted demo data is synthetic.</div><button class="button primary submit-button" type="submit"><Plus :size="17" /> Register report</button></form></section></div>
-    <div v-if="notices.length" class="toast" role="status" @click="notices = []"><Check :size="16" />{{ notices[0] }}<button aria-label="Dismiss">×</button></div>
+    <div v-if="modalOpen" class="overlay" @click.self="modalOpen=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="report-title"><button class="close" aria-label="Close" @click="modalOpen=false">×</button><div class="eyebrow">COMMUNITY SUBMISSION · NO PROJECT ID REQUIRED</div><h2 id="report-title">Report a need or observation</h2><p>Government approval and proof of residence are not required to register a community concern.</p><form @submit.prevent="submitReport"><label>Report type<select v-model="form.type"><option value="COMMUNITY_NEED">Community need</option><option value="SERVICE_OBSERVATION">Service observation</option></select></label><label>Category<select v-model="form.category"><option v-for="category in (['PUBLIC_LIGHTING','ROADS_TRANSPORT','WATER','SANITATION','STORMWATER','WASTE_MANAGEMENT','PUBLIC_FACILITIES'] as Category[])" :key="category" :value="category">{{ categoryLabel(category) }}</option></select></label><label>Title<input v-model="form.title" required minlength="3" maxlength="160" placeholder="What is needed or observed?"/></label><label>Description<textarea v-model="form.description" required minlength="10" maxlength="10000" rows="4" placeholder="Describe the need or service concern"></textarea></label><label>Area<select v-model="form.area"><option v-for="area in [...new Set(projects.map(p=>p.area))]" :key="area">{{ area }}</option></select></label><label>Location details<input v-model="form.location" required placeholder="Street, landmark or nearby place"/></label><div class="caution">Evidence upload is not configured in this browser-only demo. You can submit without photos or video.</div><button class="primary-btn submit-btn">Register report</button></form></section></div>
+    <div v-if="notice" class="toast" role="status">{{ notice }}<button aria-label="Dismiss" @click="notice=''">×</button></div>
+    <footer class="app-footer">CivicProof is a hackathon demo, not an official government service. Synthetic data only. Irregular expenditure or delivery discrepancies are not proof of theft or corruption.</footer>
   </div>
 </template>
