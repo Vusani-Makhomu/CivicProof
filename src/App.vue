@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { categoryLabel, demoSubmissions, projects, type Category, type CivicProject, type CivicSubmission, type SubmissionType } from './domain/demoData'
 import { findMatches } from './domain/matching'
+import { migrateLegacyReportOwners } from './domain/reportVisibility'
 
 type Role = 'COMMUNITY_MEMBER' | 'GOVERNMENT_REVIEWER' | 'DEPARTMENT_OFFICIAL' | 'INVESTIGATOR' | 'AUDITOR' | 'ADMIN'
 type Report = CivicSubmission & { ownerId?: string | null; matchCandidates: string[]; investigationType: 'COMMUNITY_NEED' | 'PROJECT_ACCOUNTABILITY' | null }
@@ -30,7 +31,7 @@ function load<T>(key: string, fallback: T): T {
   try { const value = localStorage.getItem(key); return value ? JSON.parse(value) as T : fallback }
   catch { return fallback }
 }
-const reports = ref<Report[]>(load('civicproof-reports', seededReports))
+const reports = ref<Report[]>(migrateLegacyReportOwners(load<Report[]>('civicproof-reports', seededReports), memberId))
 const responses = ref<Note[]>(load('civicproof-responses', []))
 const findings = ref<Finding[]>(load('civicproof-findings', []))
 const actions = ref<Action[]>(load('civicproof-actions', []))
